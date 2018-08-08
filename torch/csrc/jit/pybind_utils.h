@@ -121,6 +121,8 @@ inline IValue toIValue(py::handle obj, const TypePtr& type) {
       }
       case TypeKind::NumberType:
         AT_ERROR("Insufficient type information to convert input");
+      case TypeKind::WorldType:
+        AT_ERROR("World arguments should not be passed in by users");
     }
   AT_ERROR("Missing cases in toIValue! File a bug report.");
 }
