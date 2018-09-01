@@ -121,14 +121,15 @@ namespace {
   Tensor grid_sampler_2d_cpu_impl(const Tensor& input, const Tensor& grid,
                                  GridSamplerInterpolation interpolation_mode,
                                  GridSamplerPadding padding_mode) {
-    int64_t N = input.size(0);
-    int64_t C = input.size(1);
-    int64_t inp_H = input.size(2);
-    int64_t inp_W = input.size(3);
-    int64_t out_H = grid.size(1);
-    int64_t out_W = grid.size(2);
-    auto output = at::empty({N, C, out_H, out_W}, input.options());
-    int64_t inp_sN = input.stride(0);
+//Input= Heatmap, Grid= Affine_grid, output=Sub-feature
+    int64_t N = input.size(0);  //91
+    int64_t C = input.size(1);  //1
+    int64_t inp_H = input.size(2);  //32
+    int64_t inp_W = input.size(3);  //32
+    int64_t out_H = grid.size(1); //9
+    int64_t out_W = grid.size(2); //9
+    auto output = at::empty({N, C, out_H, out_W}, input.options()); //sub-feature [91,1,9,9]
+    int64_t inp_sN = input.stride(0);  //Strides are used to calulate the jump in memory to acess the subsequent element in that particular dim.
     int64_t inp_sC = input.stride(1);
     int64_t inp_sH = input.stride(2);
     int64_t inp_sW = input.stride(3);
@@ -139,7 +140,7 @@ namespace {
     int64_t out_sN = output.stride(0);
     int64_t out_sC = output.stride(1);
     int64_t out_sH = output.stride(2);
-    int64_t out_sW = output.stride(3);
+    int64_t out_sW = output.stride(3);  // Fxn gets strides for input, grid and output in dims 0-3
     scalar_t *inp_ptr = input.data<scalar_t>();
     scalar_t *out_ptr = output.data<scalar_t>();
     scalar_t *grid_ptr = grid.data<scalar_t>();
@@ -148,17 +149,18 @@ namespace {
     #pragma omp parallel for
     #endif
     for (int64_t n = 0; n < N; ++n) {
-      scalar_t *grid_ptr_N = grid_ptr + n * grid_sN;
-      scalar_t *inp_ptr_N = inp_ptr + n * inp_sN;
-      for (int64_t h = 0; h < out_H; ++h) {
-        for (int64_t w = 0; w < out_W; ++w) {
+      scalar_t *grid_ptr_N = grid_ptr + n * grid_sN; //n = 1  
+      scalar_t *inp_ptr_N = inp_ptr + n * inp_sN; // places inp_ptr_N at start of input_data[0,:]
+      for (int64_t h = 0; h < out_H; ++h) { // height < out_h(9) loop
+        for (int64_t w = 0; w < out_W; ++w) { //width < out_w(9) loop
           // get the corresponding input x, y co-ordinates from grid
-          scalar_t ix = grid_ptr_N[h * grid_sH + w * grid_sW];
-          scalar_t iy = grid_ptr_N[h * grid_sH + w * grid_sW + grid_sCoor];
+          scalar_t ix = grid_ptr_N[h * grid_sH + w * grid_sW]; //for eg, x = [0,1,2,0]
+          scalar_t iy = grid_ptr_N[h * grid_sH + w * grid_sW + grid_sCoor];// y = [0,1,2,1] gets cooresponing grid val wrt output
 
           // normalize ix, iy from [-1, 1] to [0, inp_W-1] & [0, inp_H-1]
-          ix = ((ix + 1) / 2) * (inp_W - 1);
-          iy = ((iy + 1) / 2) * (inp_H - 1);
+          //Affine grid has values [-1, 1], the coee is now normalizing the affine wrt input H and W
+          ix = ((ix + 1) / 2) * (inp_W - 1); //[-1,1] to [0,31]
+          iy = ((iy + 1) / 2) * (inp_H - 1); //^
 
           if (padding_mode == GridSamplerPadding::Border) {
             // clip coordinates to image borders
@@ -172,28 +174,32 @@ namespace {
 
           if (interpolation_mode == GridSamplerInterpolation::Bilinear) {
             // get NE, NW, SE, SW pixel values from (x, y)
-            int64_t ix_nw = static_cast<int64_t>(std::floor(ix));
-            int64_t iy_nw = static_cast<int64_t>(std::floor(iy));
-            int64_t ix_ne = ix_nw + 1;
-            int64_t iy_ne = iy_nw;
-            int64_t ix_sw = ix_nw;
-            int64_t iy_sw = iy_nw + 1;
-            int64_t ix_se = ix_nw + 1;
-            int64_t iy_se = iy_nw + 1;
+            //Getting 4 values in heatmap matrix of size 32x32 which correspond to Q1-Q4 used for bi-interp
+            //assuming ix = 1.32 and iy=2.34
+            int64_t ix_nw = static_cast<int64_t>(std::floor(ix)); //1
+            int64_t iy_nw = static_cast<int64_t>(std::floor(iy)); //2
+            int64_t ix_ne = ix_nw + 1; //2
+            int64_t iy_ne = iy_nw; //2
+            int64_t ix_sw = ix_nw; //1
+            int64_t iy_sw = iy_nw + 1; //3
+            int64_t ix_se = ix_nw + 1; //2
+            int64_t iy_se = iy_nw + 1; //3
 
             // get surfaces to each neighbor:
-            scalar_t nw = (ix_se - ix)    * (iy_se - iy);
-            scalar_t ne = (ix    - ix_sw) * (iy_sw - iy);
-            scalar_t sw = (ix_ne - ix)    * (iy    - iy_ne);
-            scalar_t se = (ix    - ix_nw) * (iy    - iy_nw);
+            
+            scalar_t nw = (ix_se - ix)    * (iy_se - iy); //.4488
+            scalar_t ne = (ix    - ix_sw) * (iy_sw - iy); //.2112
+            scalar_t sw = (ix_ne - ix)    * (iy    - iy_ne); //.2312
+            scalar_t se = (ix    - ix_nw) * (iy    - iy_nw); //.1088
 
             // calculate bilinear weighted pixel value and set output pixel
-            scalar_t *out_ptr_NCHW = out_ptr + n * out_sN + h * out_sH + w * out_sW;
-            scalar_t *inp_ptr_NC = inp_ptr_N;
+            scalar_t *out_ptr_NCHW = out_ptr + n * out_sN + h * out_sH + w * out_sW; // points to output pixel to be set
+            scalar_t *inp_ptr_NC = inp_ptr_N; //batch number
             for (int c = 0; c < C; ++c, out_ptr_NCHW += out_sC, inp_ptr_NC += inp_sC) {
               //   (c, iy_nw, ix_nw) * nw + (c, iy_ne, ix_ne) * ne
               // + (c, iy_sw, ix_sw) * sw + (c, iy_se, ix_se) * se
-              *out_ptr_NCHW = static_cast<scalar_t>(0);
+              *out_ptr_NCHW = static_cast<scalar_t>(0); //since output was empty, setting zero value? 
+              //checking if Q1-Q4 are insisde 0-31 and assign add value
               if (within_bounds_2d(iy_nw, ix_nw, inp_H, inp_W)) {
                 *out_ptr_NCHW += inp_ptr_NC[iy_nw * inp_sH + ix_nw * inp_sW] * nw;
               }
